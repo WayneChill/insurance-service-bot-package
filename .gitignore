@@ -1,0 +1,15 @@
+# 敏感資訊
+credentials.json
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# Excel 資料（本地使用）
+*.xlsx
+*.xls
