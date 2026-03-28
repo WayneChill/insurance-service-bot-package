@@ -48,10 +48,24 @@ class SheetsDB:
     """單例式 Google Sheets 連線（app 啟動時初始化一次）"""
 
     def __init__(self):
-        creds = _get_creds()
-        gc = gspread.authorize(creds)
+        print("[DB] 開始連線 Google Sheets...", flush=True)
+        b64 = os.environ.get("GOOGLE_CREDENTIALS_B64", "")
+        if b64:
+            import json, base64, tempfile
+            info = json.loads(base64.b64decode(b64).decode("utf-8"))
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+                json.dump(info, f)
+                tmp_path = f.name
+            gc = gspread.service_account(filename=tmp_path)
+            os.unlink(tmp_path)
+        else:
+            path = os.environ.get("GOOGLE_CREDENTIALS_FILE", "credentials.json")
+            gc = gspread.service_account(filename=path)
+        print(f"[DB] 嘗試開啟 GOOGLE_SHEET_ID: {os.environ.get('GOOGLE_SHEET_ID','未設定')}", flush=True)
         self.spreadsheet = gc.open_by_key(os.environ["GOOGLE_SHEET_ID"])
+        print("[DB] Sheets 連線成功", flush=True)
         self._ensure_sheets()
+        print("[DB] 工作表初始化完成", flush=True)
 
     # ── 初始化工作表 ───────────────────────────────────────────
     def _ensure_sheets(self):

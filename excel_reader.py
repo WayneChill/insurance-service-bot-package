@@ -281,7 +281,65 @@ def get_life_daily_stats() -> dict:
     return stats
 
 
-# ── 每日早報：產險各群件數 ────────────────────────────────
+# ── 壽險詳細名單（壽星 + 保單周年）────────────────────────
+def get_life_daily_detail() -> dict:
+    """
+    回傳 {
+      "birthdays": [{"name": "王小明", "tel": "0912...", "dob": "1980/03/28"}, ...],
+      "anniversaries": [{"name": "王小明", "policy_num": "...", "company": "...", "years": N}, ...]
+    }
+    """
+    result = {"birthdays": [], "anniversaries": []}
+    try:
+        buf   = download_excel(LIFE_FILE)
+        wb    = load_workbook(buf, read_only=True)
+        ws    = wb.active
+        today = datetime.today()
+        seen_insured = set()
+        seen_policy  = set()
+
+        for i, row in enumerate(ws.iter_rows(values_only=True), 1):
+            if i < 8:
+                continue
+            if not row or len(row) < 35:
+                continue
+            policy_raw = safe_get(row, 0)
+            if not policy_raw or policy_raw.startswith("附約") or policy_raw == "保單號碼":
+                continue
+
+            # 壽星
+            insured = safe_get(row, 21)
+            dob_val = safe_get(row, 22)
+            tel     = safe_get(row, 34)
+            if insured and insured not in seen_insured and dob_val:
+                dob = roc_to_ad(dob_val)
+                if dob and dob.month == today.month and dob.day == today.day:
+                    result["birthdays"].append({
+                        "name": insured,
+                        "tel":  tel,
+                        "dob":  f"{dob.year}/{dob.month:02d}/{dob.day:02d}",
+                    })
+                    seen_insured.add(insured)
+
+            # 保單周年
+            policy_num = _clean_policy(policy_raw, safe_get(row, 10))
+            if policy_num and policy_num not in seen_policy:
+                start_val  = safe_get(row, 10)
+                start_date = roc_to_ad(start_val)
+                if start_date and start_date.month == today.month and start_date.day == today.day:
+                    years = today.year - start_date.year
+                    result["anniversaries"].append({
+                        "name":       insured if insured else safe_get(row, 19),
+                        "policy_num": policy_num,
+                        "company":    safe_get(row, 2),
+                        "years":      years,
+                        "tel":        tel,
+                    })
+                    seen_policy.add(policy_num)
+
+    except Exception as e:
+        print(f"[WARN] 壽險詳細名單失敗: {e}")
+    return result
 def get_property_daily_stats(statuses: dict) -> dict:
     """
     從 42004.xlsx 計算急件/追蹤/新件，再加上 Sheets 內的延後件數

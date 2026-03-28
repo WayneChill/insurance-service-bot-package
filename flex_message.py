@@ -249,6 +249,77 @@ def _prop_group(days):
     return "新續保件", "#2ED573"
 
 
+
+def build_life_detail_card(detail: dict) -> dict:
+    """壽星 + 保單周年 Flex 卡片"""
+    birthdays     = detail.get("birthdays", [])
+    anniversaries = detail.get("anniversaries", [])
+    contents = []
+
+    if birthdays:
+        contents.append({"type": "text", "text": "🎂 當日壽星",
+                         "weight": "bold", "size": "sm", "color": "#0F6E56"})
+        for b in birthdays:
+            contents.append({
+                "type": "box", "layout": "horizontal", "spacing": "sm",
+                "paddingAll": "8px", "backgroundColor": "#F1EFE8",
+                "cornerRadius": "6px", "margin": "sm",
+                "contents": [
+                    {"type": "box", "layout": "vertical", "flex": 3,
+                     "contents": [
+                         {"type": "text", "text": b["name"], "size": "sm",
+                          "weight": "bold", "color": "#2C2C2A"},
+                         {"type": "text", "text": b["dob"], "size": "xxs", "color": "#888780"},
+                     ]},
+                    {"type": "text", "text": b.get("tel", ""), "size": "xs",
+                     "color": "#0F6E56", "align": "end", "flex": 2, "gravity": "center"},
+                ]
+            })
+
+    if anniversaries:
+        if contents:
+            contents.append({"type": "separator", "margin": "md"})
+        contents.append({"type": "text", "text": "📋 保單周年",
+                         "weight": "bold", "size": "sm", "color": "#0F6E56", "margin": "md"})
+        for a in anniversaries:
+            contents.append({
+                "type": "box", "layout": "vertical", "spacing": "xs",
+                "paddingAll": "8px", "backgroundColor": "#F1EFE8",
+                "cornerRadius": "6px", "margin": "sm",
+                "contents": [
+                    {"type": "box", "layout": "horizontal",
+                     "contents": [
+                         {"type": "text", "text": a["name"], "size": "sm",
+                          "weight": "bold", "color": "#2C2C2A", "flex": 3},
+                         {"type": "text", "text": f"第{a['years']}年",
+                          "size": "xs", "color": "#FF6B6B", "align": "end", "flex": 1},
+                     ]},
+                    {"type": "text", "text": f"{a['company']}  {a['policy_num']}",
+                     "size": "xxs", "color": "#888780"},
+                    {"type": "text", "text": a.get("tel", ""),
+                     "size": "xxs", "color": "#0F6E56"},
+                ]
+            })
+
+    if not contents:
+        contents = [{"type": "text", "text": "今日無壽星或保單周年",
+                     "size": "sm", "color": "#888780"}]
+
+    return {
+        "type": "bubble", "size": "kilo",
+        "header": {
+            "type": "box", "layout": "vertical", "backgroundColor": "#E1F5EE",
+            "contents": [
+                {"type": "text", "text": "壽險提醒", "weight": "bold",
+                 "size": "lg", "color": "#0F6E56"},
+                {"type": "text", "text": f"壽星 {len(birthdays)} 位・周年 {len(anniversaries)} 組",
+                 "size": "xs", "color": "#0F6E56"},
+            ]
+        },
+        "body": {"type": "box", "layout": "vertical", "spacing": "sm", "contents": contents}
+    }
+
+
 def build_property_card(row, current_status=None) -> dict:
     """產險單張 bubble（同原 insurance-bot）"""
     import urllib.parse
