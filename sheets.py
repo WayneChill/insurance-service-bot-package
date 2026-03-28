@@ -49,12 +49,14 @@ class SheetsDB:
 
     def __init__(self):
         print("[DB] 開始連線 Google Sheets...", flush=True)
+        creds = _get_creds()
+        print("[DB] 憑證取得成功", flush=True)
         b64 = os.environ.get("GOOGLE_CREDENTIALS_B64", "")
         if b64:
-            import json, base64, tempfile
-            info = json.loads(base64.b64decode(b64).decode("utf-8"))
+            import tempfile
+            info2 = json.loads(base64.b64decode(b64).decode("utf-8"))
             with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-                json.dump(info, f)
+                json.dump(info2, f)
                 tmp_path = f.name
             gc = gspread.service_account(filename=tmp_path)
             os.unlink(tmp_path)
@@ -121,7 +123,7 @@ class SheetsDB:
     def count_cases_by_status(self) -> dict:
         """回傳每日早報用的保服統計"""
         ws = self._ws(WS_CASES)
-        counts = {"已聯絡": 0, "已送出": 0, "核對中": 0}
+        counts = {"待處理": 0, "已聯絡": 0, "已送出": 0, "核對中": 0}
         for r in ws.get_all_records():
             s = r.get("狀態", "")
             if s in counts:
@@ -167,6 +169,16 @@ class SheetsDB:
                 return True
         return False
 
+    def update_biz_note(self, rid: str, note: str) -> str:
+        """更新業務備註，回傳姓名（找不到回傳空字串）"""
+        ws = self._ws(WS_BIZ)
+        for i, r in enumerate(ws.get_all_records(), start=2):
+            if r.get("ID") == rid:
+                ws.update_cell(i, 5, note)
+                ws.update_cell(i, 7, _now())
+                return r.get("姓名", "")
+        return ""
+
     def count_biz_by_stage(self) -> dict:
         counts = {s: 0 for s in BIZ_STAGES}
         for r in self._ws(WS_BIZ).get_all_records():
@@ -196,6 +208,16 @@ class SheetsDB:
                 ws.update_cell(i, 7, _now())
                 return True
         return False
+
+    def update_recruit_note(self, rid: str, note: str) -> str:
+        """更新增員備註，回傳姓名（找不到回傳空字串）"""
+        ws = self._ws(WS_RECRUIT)
+        for i, r in enumerate(ws.get_all_records(), start=2):
+            if r.get("ID") == rid:
+                ws.update_cell(i, 5, note)
+                ws.update_cell(i, 7, _now())
+                return r.get("姓名", "")
+        return ""
 
     def count_recruit_by_stage(self) -> dict:
         counts = {s: 0 for s in RECRUIT_STAGES}
