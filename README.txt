@@ -35,6 +35,11 @@
 ⑥ 授權金鑰
    聯絡 Wayne 取得，拿到一串英數字備用
 
+   ★ 重要：取得授權金鑰前，你必須先提供以下資料給 Wayne：
+     → 你的 LINE Channel Secret（取得方式見第二步④）
+     → Wayne 會用這個資料把金鑰綁定到你的帳號
+     → 金鑰一旦綁定就無法轉讓給他人使用
+
 
 ================================================================
 【第二步：設定 LINE Official Account】
@@ -56,9 +61,15 @@
    往下找「Channel access token」→ 點「Issue」
    複製這串字 → 存到記事本，標記為【Token】
 
-④ 取得 Channel Secret
+④ 取得 Channel Secret（★ 這個要傳給 Wayne 才能取得授權金鑰）
    同一個頁面往上找「Channel secret」
-   複製這串字 → 存到記事本，標記為【Secret】
+   右邊點「Copy」複製這串字
+   → 存到記事本，標記為【Secret】
+   → 同時把這串字傳給 Wayne，Wayne 才能幫你產生專屬金鑰
+
+   ！注意：Channel Secret 是你帳號的識別碼
+           金鑰會綁定這串字，別人拿到你的金鑰也無法使用
+           請不要把 Channel Secret 分享給不認識的人
 
 ⑤ 取得你的 LINE User ID
    同一個頁面找「Your user ID」
@@ -167,6 +178,12 @@
    DRIVE_FOLDER_ID           = 填入【DriveID】
    LICENSE_KEY               = 填入 Wayne 給的金鑰
 
+   ★ 關於授權金鑰：
+     - 金鑰格式像這樣：XXXX-XXXX-XXXX-XXXX
+     - 金鑰已綁定你的 LINE Channel Secret，無法給其他人使用
+     - 金鑰有使用期限，到期前請聯絡 Wayne 續期
+     - 請妥善保管，不要把金鑰分享給任何人
+
 ③ 存檔
 
 ④ 把「credentials.json」放入捆包資料夾（和 config.txt 同一層）
@@ -205,7 +222,7 @@
    LINE_USER_ID              = 【UserID】
    GOOGLE_SHEET_ID           = 【SheetsID】
    DRIVE_FOLDER_ID           = 【DriveID】
-   LICENSE_KEY               = Wayne 給的金鑰
+   LICENSE_KEY               = Wayne 給的金鑰（格式：XXXX-XXXX-XXXX-XXXX）
 
    ★ 特別重要：credentials.json 要轉成 base64
      打開 PowerShell（開始 → 搜尋 PowerShell）
@@ -271,6 +288,39 @@
 說明                     顯示此說明
 
 每天早上 8:00 自動推播每日早報。
+
+================================================================
+【取得授權金鑰的完整流程】
+================================================================
+
+在安裝之前，你需要先向 Wayne 取得授權金鑰。
+金鑰會綁定你的 LINE 帳號，確保只有你能使用。
+
+步驟一：先完成第二步，取得你的 Channel Secret
+   → Channel Secret 是一串 32 碼的英數字
+   → 在 LINE Developers → Messaging API 頁面可以找到
+
+步驟二：把以下資料傳給 Wayne
+   ① 你的姓名（或公司名稱）
+   ② 你的 LINE Channel Secret【Secret】
+   → 可以用 LINE 私訊、Email 或任何方式傳給 Wayne
+
+步驟三：Wayne 會幫你產生專屬金鑰
+   → 金鑰格式：XXXX-XXXX-XXXX-XXXX
+   → 金鑰有效期限依雙方約定
+   → 金鑰綁定你的 Channel Secret，無法轉讓他人
+
+步驟四：收到金鑰後
+   → 填入 config.txt 的 LICENSE_KEY 欄位
+   → 填入 Railway 環境變數的 LICENSE_KEY
+
+！注意事項：
+   - 金鑰只能搭配你提供的 Channel Secret 使用
+   - 如果你重新建立 LINE OA（Channel Secret 會改變），
+     需要通知 Wayne 重新綁定
+   - 金鑰到期前 7 天請聯絡 Wayne 續期，否則 Bot 會停止運作
+   - 請勿將金鑰分享給他人，分享後你的帳號可能被停用
+
 
 ================================================================
 如有問題請聯絡 Wayne
