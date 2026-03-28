@@ -1,12 +1,10 @@
 """
-app.py ── 保險業務發展小幫手 LINE Bot
+app.py ── 保險發展小幫手 LINE Bot
 合併：產險助手 + 保服助手
-Railway 部署：insurance-service-bot 專案
+Railway 部署：insurance-service-bot 專案（主）
 """
 import os
 import json
-import urllib.request
-import urllib.error
 from urllib.parse import unquote
 from datetime import datetime
 from flask import Flask, request, abort
@@ -34,56 +32,14 @@ for _k, _v in _cfg.items():
     if _k not in os.environ:
         os.environ[_k] = _v
 
-# ── 授權金鑰驗證 ──────────────────────────────────────────
-VERIFY_URL = "https://insurance-service-bot-production.up.railway.app/verify-key"
-
-def _get_license_key():
-    key = os.environ.get("LICENSE_KEY", "").strip()
-    if key and "請填入" not in key:
-        return key
-    if os.path.exists("license.txt"):
-        with open("license.txt", encoding="utf-8") as f:
-            key = f.read().strip()
-        if key and "請填入" not in key:
-            return key
-    return ""
-
-def _verify_license():
-    key = _get_license_key()
-    if not key:
-        print("❌ 未提供授權金鑰")
-        return False
-    try:
-        data = json.dumps({"key": key, "channel_secret": os.environ.get("LINE_CHANNEL_SECRET", "")}).encode("utf-8")
-        req  = urllib.request.Request(
-            VERIFY_URL, data=data,
-            headers={"Content-Type": "application/json"}, method="POST"
-        )
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-        if result.get("valid"):
-            print(f"✅ 授權金鑰驗證成功（{result.get('user','')}，有效至 {result.get('expiry','')}）")
-            return True
-        print(f"❌ {result.get('message','金鑰驗證失敗')}")
-        return False
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
-        print(f"❌ 授權伺服器錯誤 HTTP {e.code}：{body[:200]}")
-        return False
-    except Exception as e:
-        print(f"❌ 無法連線授權伺服器：{e}")
-        return False
-
-import sys
-if not _verify_license():
-    sys.exit(1)
+# 自用版，無需授權金鑰驗證
 
 # ── 初始化 ────────────────────────────────────────────────
 from sheets import SheetsDB
 from excel_reader import search_client
 from flex_message import (
-    build_client_card, build_cases_card,
-    build_biz_list_card, build_help_message
+    build_client_card, build_cases_card, build_case_created_card,
+    build_biz_list_card, build_biz_single_card, build_help_message
 )
 from scheduler import start_scheduler
 
@@ -144,18 +100,26 @@ def handle_postback(event):
     name   = unquote(params.get("name", ""))
     policy = unquote(params.get("policy", ""))
 
+    # ── 保服案件開立（理賠/契變/保費變更）
     if action in ("理賠", "契變", "保費變更"):
-        case_id = get_db().add_case(name, action, policy)
-        _reply_text(event, f"✅ 已開立案件 #{case_id}\n客戶：{name}\n項目：{action}\n\n輸入「進度 {name}」查看進度")
+        case_id  = get_db().add_case(name, action, policy)
+        contents = build_case_created_card(case_id, name, action, policy)
+        _reply_flex(event, f"案件開立 {name}", contents)
+
+    # ── 保服案件狀態更新
     elif action == "update":
         case_id = unquote(params.get("id", ""))
         status  = unquote(params.get("status", ""))
         get_db().update_case_status(case_id, status)
         _reply_text(event, f"✅ 案件 #{case_id} 已更新為「{status}」")
+
+    # ── 查看保服進度
     elif action == "check_cases":
         cases    = get_db().get_cases(name)
         contents = build_cases_card(name, cases)
         _reply_flex(event, f"保服進度：{name}", contents)
+
+    # ── 產險 Postback（報價/延後/不續保/續保完成）
     elif action in ("quoted", "delay", "delay7", "cancel", "done"):
         policy_id = unquote(params.get("id", ""))
         pname     = unquote(params.get("name", "保戶"))
@@ -170,17 +134,21 @@ def handle_postback(event):
             "cancel": f"❌ {pname} 已標記為不續保",
             "done":   f"✅ {pname} 續保完成，已記錄",
         }
-        get_db().write_property_status(policy_id, pname, _LABELS[action])
+        label = _LABELS[action]
+        get_db().write_property_status(policy_id, pname, label)
         _reply_text(event, _REPLIES[action])
+
     else:
         _reply_text(event, "未知操作")
 
 
 # ── 指令解析 ──────────────────────────────────────────────
+
 def _parse_command(text: str) -> dict:
     parts = text.split()
     cmd   = parts[0] if parts else ""
 
+    # 查詢 <姓名>
     if cmd == "查詢" and len(parts) >= 2:
         name    = parts[1]
         clients = search_client(name)
@@ -190,12 +158,14 @@ def _parse_command(text: str) -> dict:
         contents = build_client_card(clients, name, cards)
         return _f(f"客戶資料：{name}", contents)
 
+    # 進度 <姓名>
     elif cmd == "進度" and len(parts) >= 2:
         name     = parts[1]
         cases    = get_db().get_cases(name)
         contents = build_cases_card(name, cases)
         return _f(f"保服進度：{name}", contents)
 
+    # 早報（手動觸發）
     elif cmd == "早報":
         try:
             from scheduler import _build_morning_report
@@ -206,63 +176,85 @@ def _parse_command(text: str) -> dict:
             traceback.print_exc()
             return _t(f"❌ 早報錯誤：{e}")
 
+    # 保服（待處理案件列表）
     elif cmd == "保服":
-        pending = get_db().get_all_pending_cases()
+        pending  = get_db().get_all_pending_cases()
         if not pending:
             return _t("✅ 目前沒有待處理的保服案件")
         contents = build_cases_card("保服案件", pending)
         return _f("保服案件", contents)
-
+        
+ # 待辦（今日彙整）
     elif cmd == "待辦":
         try:
             import pandas as pd
-            from excel_reader import download_excel
-            urgent_list = []
-            try:
-                buf = download_excel("42004.xlsx")
-                df  = pd.read_excel(buf, header=3)
-                df.columns = df.columns.str.strip()
-                df = df[df["保單號碼"].notna()]
-                df = df[~df["保單號碼"].astype(str).str.contains("險種代號|附約")]
-                def _roc(v):
-                    try:
-                        s = str(int(v)).zfill(7)
-                        return pd.Timestamp(int(s[0:3])+1911, int(s[3:5]), int(s[5:7]))
-                    except: return pd.NaT
-                df["到期日"]   = df["保險迄日"].apply(_roc)
-                today          = pd.Timestamp(datetime.today().date())
-                df["剩餘天數"] = (df["到期日"] - today).dt.days
-                urgent_df = df[
-                    df["剩餘天數"].notna() &
-                    df["剩餘天數"].between(0, 10) &
-                    df["狀態"].astype(str).str.contains("正常")
-                ]
-                statuses = get_db().get_property_status()
-                skip = {"續保完成", "不續保"}
-                for _, row in urgent_df.iterrows():
-                    pid = str(row["保單號碼"]).strip()
-                    cur = statuses.get(pid, {}).get("status", "")
-                    if cur not in skip:
-                        urgent_list.append(f"▪️ {row['被保姓名']} 倒數{int(row['剩餘天數'])}天")
-            except Exception:
-                pass
+            from excel_reader import download_excel, get_life_daily_detail
+            from datetime import datetime
 
-            cases   = get_db().get_all_pending_cases()
-            biz     = [r for r in get_db().get_biz_list() if r.get("階段") in ["已聯繫", "建議書"]]
+            # 產險急件
+            buf = download_excel("42004.xlsx")
+            df  = pd.read_excel(buf, header=3)
+            df.columns = df.columns.str.strip()
+            df = df[df["保單號碼"].notna()]
+            df = df[~df["保單號碼"].astype(str).str.contains("險種代號|附約")]
+            def _roc(v):
+                try:
+                    s = str(int(v)).zfill(7)
+                    return pd.Timestamp(int(s[0:3])+1911, int(s[3:5]), int(s[5:7]))
+                except: return pd.NaT
+            df["到期日"] = df["保險迄日"].apply(_roc)
+            today = pd.Timestamp(datetime.today().date())
+            df["剩餘天數"] = (df["到期日"] - today).dt.days
+            urgent_df = df[
+                df["剩餘天數"].notna() &
+                df["剩餘天數"].between(0, 10) &
+                df["狀態"].astype(str).str.contains("正常")
+            ]
+            statuses = get_db().get_property_status()
+            skip = {"續保完成", "不續保"}
+            urgent_list = []
+            for _, row in urgent_df.iterrows():
+                pid = str(row["保單號碼"]).strip()
+                cur = statuses.get(pid, {}).get("status", "")
+                if cur not in skip:
+                    urgent_list.append(f"▪️ {row['被保姓名']} 倒數{int(row['剩餘天數'])}天")
+
+            # 保服未完成
+            cases = get_db().get_all_pending_cases()
+
+            # 業務待跟進
+            biz = [r for r in get_db().get_biz_list() if r.get("階段") in ["已聯繫", "建議書"]]
+
+            # 增員待跟進
             recruit = [r for r in get_db().get_recruit_list() if r.get("階段") in ["已聯繫", "約聊聊"]]
 
             lines = ["📌 今日待辦彙整", ""]
             lines.append(f"🚨 產險急件（{len(urgent_list)} 組）")
-            lines += urgent_list[:5] if urgent_list else ["▪️ 無急件"]
+            for u in urgent_list[:5]:
+                lines.append(u)
+            if not urgent_list:
+                lines.append("▪️ 無急件")
+
             lines.append("")
             lines.append(f"📋 保服未完成（{len(cases)} 件）")
-            lines += [f"▪️ {c.get('客戶姓名','')} {c.get('服務項目','')} [{c.get('狀態','')}]" for c in cases[:5]] if cases else ["▪️ 無待處理"]
+            for c in cases[:5]:
+                lines.append(f"▪️ {c.get('客戶姓名','')} {c.get('服務項目','')} [{c.get('狀態','')}]")
+            if not cases:
+                lines.append("▪️ 無待處理")
+
             lines.append("")
             lines.append(f"💼 業務待跟進（{len(biz)} 組）")
-            lines += [f"▪️ {b.get('姓名','')} [{b.get('階段','')}]" for b in biz[:5]] if biz else ["▪️ 無待跟進"]
+            for b in biz[:5]:
+                lines.append(f"▪️ {b.get('姓名','')} [{b.get('階段','')}]")
+            if not biz:
+                lines.append("▪️ 無待跟進")
+
             lines.append("")
             lines.append(f"👥 增員待跟進（{len(recruit)} 組）")
-            lines += [f"▪️ {r.get('姓名','')} [{r.get('階段','')}]" for r in recruit[:5]] if recruit else ["▪️ 無待跟進"]
+            for r in recruit[:5]:
+                lines.append(f"▪️ {r.get('姓名','')} [{r.get('階段','')}]")
+            if not recruit:
+                lines.append("▪️ 無待跟進")
 
             return _t("\n".join(lines))
         except Exception as e:
@@ -270,11 +262,13 @@ def _parse_command(text: str) -> dict:
             traceback.print_exc()
             return _t(f"❌ 待辦彙整錯誤：{e}")
 
+    # 說明 / help
     elif cmd in ("說明", "help", "?"):
         pending  = get_db().get_all_pending_cases()
         contents = build_help_message(pending)
         return _f("指令說明", contents)
 
+    # 產險（顯示到期卡片）
     elif cmd == "產險":
         try:
             import pandas as pd
@@ -291,8 +285,10 @@ def _parse_command(text: str) -> dict:
                 try:
                     s = str(int(v)).zfill(7)
                     return pd.Timestamp(int(s[0:3]) + 1911, int(s[3:5]), int(s[5:7]))
-                except: return pd.NaT
+                except Exception:
+                    return pd.NaT
             df["到期日"]   = df["保險迄日"].apply(_roc)
+            from datetime import datetime
             today          = pd.Timestamp(datetime.today().date())
             df["剩餘天數"] = (df["到期日"] - today).dt.days
             urgent = df[
@@ -320,6 +316,7 @@ def _parse_command(text: str) -> dict:
             traceback.print_exc()
             return _t(f"❌ 產險查詢錯誤：{e}")
 
+    # 壽險（顯示壽星 + 保單周年卡片）
     elif cmd == "壽險":
         try:
             from excel_reader import get_life_daily_detail
@@ -332,70 +329,170 @@ def _parse_command(text: str) -> dict:
             traceback.print_exc()
             return _t(f"❌ 壽險查詢錯誤：{e}")
 
-    elif cmd == "業務":
-        records  = get_db().get_biz_list()
-        contents = build_biz_list_card(records, "💼 業務追蹤")
-        return _f("業務追蹤", contents)
+    # 銷售（列表，已結案不顯示）
+    elif cmd == "銷售":
+        records  = [r for r in get_db().get_biz_list() if r.get("階段") != "已結案"]
+        contents = build_biz_list_card(records, "💼 銷售追蹤")
+        return _f("銷售追蹤", contents)
 
+    # 增員（列表，已結案不顯示）
     elif cmd == "增員":
-        records  = get_db().get_recruit_list()
+        records  = [r for r in get_db().get_recruit_list() if r.get("階段") != "已結案"]
         contents = build_biz_list_card(records, "👥 增員追蹤")
         return _f("增員追蹤", contents)
 
-    elif cmd == "新增業務" and len(parts) >= 2:
+    # 新增準客戶 <姓名> <電話> <階段>
+    elif cmd == "新增準客戶" and len(parts) >= 2:
         name  = parts[1]
         phone = parts[2] if len(parts) >= 3 else ""
         stage = parts[3] if len(parts) >= 4 else "已聯繫"
         rid   = get_db().add_biz(name, phone, stage)
-        return _t(f"✅ 已新增業務追蹤 #{rid}\n姓名：{name}\n電話：{phone}\n階段：{stage}")
+        contents = build_biz_single_card(rid, name, phone, stage, "💼 銷售追蹤")
+        return _f(f"已新增準客戶 {name}", contents)
 
-    elif cmd == "新增增員" and len(parts) >= 2:
+    # 新增準增員 <姓名> <電話> <階段>
+    elif cmd == "新增準增員" and len(parts) >= 2:
         name  = parts[1]
         phone = parts[2] if len(parts) >= 3 else ""
         stage = parts[3] if len(parts) >= 4 else "已聯繫"
         rid   = get_db().add_recruit(name, phone, stage)
-        return _t(f"✅ 已新增增員追蹤 #{rid}\n姓名：{name}\n電話：{phone}\n階段：{stage}")
+        contents = build_biz_single_card(rid, name, phone, stage, "👥 增員追蹤")
+        return _f(f"已新增準增員 {name}", contents)
 
-    elif cmd == "更新業務" and len(parts) >= 3:
-        rid, stage = parts[1], parts[2]
-        ok = get_db().update_biz_stage(rid, stage)
-        return _t(f"✅ 業務 {rid} 已更新為「{stage}」" if ok else f"❌ 找不到業務 {rid}")
+    # 記錄 <ID> [內容]  例：記錄 B001 已約好下週見面
+    elif cmd == "記錄" and len(parts) >= 2:
+        rid = parts[1]
+        if len(parts) >= 3:
+            note     = " ".join(parts[2:])
+            is_biz   = rid.upper().startswith("B")
+            name     = get_db().update_biz_note(rid, note) if is_biz else get_db().update_recruit_note(rid, note)
+            return _t(f"✅ {rid} 備註已記錄：{note}" if name else f"❌ 找不到 {rid}")
+        else:
+            return _t(f"✏️ 請輸入備註內容：\n格式：記錄 {rid} [內容]\n例：記錄 {rid} 已約好下週三見面")
 
+    # 更新銷售 <ID> <階段>  例：更新銷售 B001 建議書
+    elif cmd == "更新銷售" and len(parts) >= 3:
+        rid   = parts[1]
+        stage = parts[2]
+        ok    = get_db().update_biz_stage(rid, stage)
+        return _t(f"✅ 銷售 {rid} 已更新為「{stage}」" if ok else f"❌ 找不到銷售 {rid}")
+
+    # 更新增員 <ID> <階段>
     elif cmd == "更新增員" and len(parts) >= 3:
-        rid, stage = parts[1], parts[2]
-        ok = get_db().update_recruit_stage(rid, stage)
+        rid   = parts[1]
+        stage = parts[2]
+        ok    = get_db().update_recruit_stage(rid, stage)
         return _t(f"✅ 增員 {rid} 已更新為「{stage}」" if ok else f"❌ 找不到增員 {rid}")
 
+    # 新增卡片 <姓名> <銀行> <卡號前4碼> <效期> [保單號碼]
     elif cmd == "新增卡片" and len(parts) >= 5:
-        c_name, c_bank, c_num, c_exp = parts[1], parts[2], parts[3], parts[4]
+        c_name   = parts[1]
+        c_bank   = parts[2]
+        c_num    = parts[3]
+        c_exp    = parts[4]
         c_policy = parts[5] if len(parts) >= 6 else ""
         get_db().add_card(c_name, c_bank, c_num, c_exp, c_policy)
         note = f"（指定保單：{c_policy}）" if c_policy else "（所有保單）"
         return _t(f"✅ 已新增信用卡\n姓名：{c_name}\n銀行：{c_bank}\n卡號：{c_num}\n效期：{c_exp}\n{note}")
 
+    # 刪除卡片 <姓名> <銀行> <卡號前4碼>
     elif cmd == "刪除卡片" and len(parts) >= 4:
-        c_name, c_bank, c_num = parts[1], parts[2], parts[3]
-        ok = get_db().delete_card(c_name, c_bank, c_num)
-        return _t(f"✅ 已刪除「{c_name}」{c_bank} {c_num} 的信用卡" if ok else "❌ 找不到該信用卡")
+        c_name = parts[1]
+        c_bank = parts[2]
+        c_num  = parts[3]
+        ok     = get_db().delete_card(c_name, c_bank, c_num)
+        if ok:
+            return _t(f"✅ 已刪除「{c_name}」{c_bank} {c_num} 的信用卡")
+        return _t("❌ 找不到該信用卡")
 
     else:
         return _t("❓ 看不懂指令，輸入「說明」查看所有指令")
 
 
 # ── 工具 ──────────────────────────────────────────────────
-def _t(text): return {"type": "text", "text": text}
-def _f(alt, contents): return {"type": "flex", "alt": alt, "contents": contents}
-def _reply_text(event, text): line_bot.reply_message(event.reply_token, TextSendMessage(text=text))
-def _reply_flex(event, alt, contents): line_bot.reply_message(event.reply_token, FlexSendMessage(alt_text=alt, contents=contents))
 
+def _t(text: str) -> dict:
+    return {"type": "text", "text": text}
+
+def _f(alt: str, contents: dict) -> dict:
+    return {"type": "flex", "alt": alt, "contents": contents}
+
+def _reply_text(event, text: str):
+    line_bot.reply_message(event.reply_token, TextSendMessage(text=text))
+
+def _reply_flex(event, alt: str, contents: dict):
+    line_bot.reply_message(event.reply_token, FlexSendMessage(alt_text=alt, contents=contents))
+
+
+LICENSE_SHEET_ID = os.environ.get("LICENSE_SHEET_ID", "1EzQtm2Egg4A-5DIRB-o_F_eWzksEeEjL-3_SWZ3dHq8")
+
+# ── 授權金鑰驗證端點 ──────────────────────────────────────
+@app.route("/verify-key", methods=["POST"])
+def verify_key():
+    from flask import jsonify
+    import gspread, base64, tempfile
+    from datetime import datetime as _dt
+    try:
+        body           = request.get_json(force=True) or {}
+        key            = body.get("key", "").strip()
+        channel_secret = body.get("channel_secret", "").strip()
+        if not key:
+            return jsonify({"valid": False, "message": "未提供金鑰"}), 400
+
+        b64 = os.environ.get("GOOGLE_CREDENTIALS_B64", "")
+        if b64:
+            info = json.loads(base64.b64decode(b64).decode("utf-8"))
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+                json.dump(info, f)
+                tmp_path = f.name
+            gc = gspread.service_account(filename=tmp_path)
+            os.unlink(tmp_path)
+        else:
+            path = os.environ.get("GOOGLE_CREDENTIALS_FILE", "credentials.json")
+            gc = gspread.service_account(filename=path)
+
+        rows = gc.open_by_key(LICENSE_SHEET_ID).sheet1.get_all_values()
+        for row in rows:
+            if not row or row[0].strip() != key:
+                continue
+            # A=金鑰 B=用戶名稱 C=到期日 D=狀態 E=Channel Secret
+            user   = row[1] if len(row) > 1 else ""
+            expiry = row[2] if len(row) > 2 else ""
+            status = row[3] if len(row) > 3 else ""
+            secret = row[4].strip() if len(row) > 4 else ""
+
+            if status != "啟用":
+                return jsonify({"valid": False, "message": "金鑰已停用"})
+            try:
+                if _dt.strptime(expiry, "%Y/%m/%d") < _dt.today():
+                    return jsonify({"valid": False, "message": "金鑰已過期"})
+            except ValueError:
+                pass
+            if secret and channel_secret != secret:
+                return jsonify({"valid": False, "message": "金鑰與帳號不符"})
+            return jsonify({"valid": True, "user": user, "expiry": expiry})
+
+        return jsonify({"valid": False, "message": "金鑰不存在"})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"valid": False, "message": f"驗證錯誤：{e}"}), 500
+
+
+# ── 健康檢查 ──────────────────────────────────────────────
 @app.route("/", methods=["GET"])
-def index(): return "保險業務發展小幫手 LINE Bot ✅"
+def index():
+    return "保險發展小幫手 LINE Bot ✅"
 
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
-    if request.method == "GET": return "OK", 200
+    """相容舊 insurance-bot 的 webhook 路徑"""
+    if request.method == "GET":
+        return "OK", 200
     return callback()
 
+
+# ── 啟動 ──────────────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
