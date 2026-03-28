@@ -54,7 +54,7 @@ def _verify_license():
         print("❌ 未提供授權金鑰")
         return False
     try:
-        data = json.dumps({"key": key}).encode("utf-8")
+        data = json.dumps({"key": key, "channel_secret": os.environ.get("LINE_CHANNEL_SECRET", "")}).encode("utf-8")
         req  = urllib.request.Request(
             VERIFY_URL, data=data,
             headers={"Content-Type": "application/json"}, method="POST"
