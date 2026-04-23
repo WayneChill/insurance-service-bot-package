@@ -41,6 +41,7 @@ from flex_message import (
     build_client_card, build_cases_card, build_case_created_card,
     build_biz_list_card, build_biz_single_card,
     build_newcase_list_card, build_newcase_single_card,
+    build_payment_list_card,
     build_help_message
 )
 from scheduler import start_scheduler
@@ -49,8 +50,6 @@ app      = Flask(__name__)
 line_bot = LineBotApi(os.environ["LINE_CHANNEL_ACCESS_TOKEN"])
 handler  = WebhookHandler(os.environ["LINE_CHANNEL_SECRET"])
 
-# ── 對話暫存（單人 Bot 用記憶體狀態）────────────────────
-_pending: dict = {}   # user_id → pending action name
 
 # ── DB（啟動時背景初始化，確保排程器能準時執行）─────────
 _db = None
@@ -104,15 +103,15 @@ def handle_message(event):
         "查詢","進度","早報","待辦","產險","壽險","新契約","銷售","增員",
         "新增新件","新增銷售","新增增員","新增卡片","刪除卡片","新增保服",
         "記錄","更新銷售","更新準增","更新新件","指令","使用說明","保服","新件",
-        "行程","本周行程","本月行程","新增行程",
+        "行程","本周行程","本月行程","新增行程","扣款失敗",
     }
     first_word = text.split()[0] if text.split() else ""
-    if first_word in _COMMANDS and _pending.get(user_id):
-        del _pending[user_id]
+    if first_word in _COMMANDS and get_db().get_pending(user_id):
+        get_db().del_pending(user_id)
 
-    pending = _pending.get(user_id)
+    pending = get_db().get_pending(user_id)
     if pending == "查詢":
-        del _pending[user_id]
+        get_db().del_pending(user_id)
         name     = text.strip()
         clients  = search_client(name)
         if not clients:
@@ -123,7 +122,7 @@ def handle_message(event):
             reply    = _f(f"客戶資料：{name}", contents)
 
     elif pending == "進度":
-        del _pending[user_id]
+        get_db().del_pending(user_id)
         name     = text.strip()
         cases    = get_db().get_cases(name)
         contents = build_cases_card(name, cases)
@@ -132,7 +131,7 @@ def handle_message(event):
     elif pending == "新增新件":
         parts = text.split()
         if len(parts) >= 2:
-            del _pending[user_id]
+            get_db().del_pending(user_id)
             name     = parts[0]
             company  = " ".join(parts[1:])
             stage    = "核保中"
@@ -145,7 +144,7 @@ def handle_message(event):
     elif pending == "新增銷售":
         parts = text.split()
         if len(parts) >= 1:
-            del _pending[user_id]
+            get_db().del_pending(user_id)
             name     = parts[0]
             phone    = parts[1] if len(parts) >= 2 else ""
             stage    = "已聯繫"
@@ -158,7 +157,7 @@ def handle_message(event):
     elif pending == "新增增員":
         parts = text.split()
         if len(parts) >= 1:
-            del _pending[user_id]
+            get_db().del_pending(user_id)
             name     = parts[0]
             phone    = parts[1] if len(parts) >= 2 else ""
             stage    = "已聯繫"
@@ -171,7 +170,7 @@ def handle_message(event):
     elif pending == "新增卡片":
         parts = text.split()
         if len(parts) >= 4:
-            del _pending[user_id]
+            get_db().del_pending(user_id)
             c_name, c_bank, c_num = parts[0], parts[1], parts[2]
             c_exp_raw = parts[3]
             # 效期：4碼數字 1031 → 10/31，其餘原樣保留
@@ -186,7 +185,7 @@ def handle_message(event):
     elif pending == "刪除卡片":
         parts = text.split()
         if len(parts) >= 3:
-            del _pending[user_id]
+            get_db().del_pending(user_id)
             c_name, c_bank, c_num = parts[0], parts[1], parts[2]
             ok = get_db().delete_card(c_name, c_bank, c_num)
             reply = _t(f"✅ 已刪除「{c_name}」{c_bank} {c_num}" if ok else "❌ 找不到該信用卡\n請確認姓名、銀行、卡號前4碼是否與新增時一致")
@@ -196,7 +195,7 @@ def handle_message(event):
     elif pending == "新增行程":
         parts = text.split()
         if len(parts) >= 4:
-            del _pending[user_id]
+            get_db().del_pending(user_id)
             date_raw = parts[0]
             time_raw = parts[1]
             stype    = parts[2]
@@ -222,7 +221,7 @@ def handle_message(event):
     elif pending == "新增保服":
         parts = text.split()
         if len(parts) >= 2:
-            del _pending[user_id]
+            get_db().del_pending(user_id)
             name     = parts[0]
             service  = " ".join(parts[1:])
             case_id  = get_db().add_case(name, service)
@@ -234,7 +233,7 @@ def handle_message(event):
     else:
         reply = _parse_command(text)
         if reply["type"] == "pending":
-            _pending[user_id] = reply["action"]
+            get_db().set_pending(user_id, reply["action"])
             reply = _t(reply["text"])
 
     if reply["type"] == "flex":
@@ -294,6 +293,13 @@ def handle_postback(event):
         label = _LABELS[action]
         get_db().write_property_status(policy_id, pname, label)
         _reply_text(event, _REPLIES[action])
+
+    # ── 扣款失敗狀態更新
+    elif action == "pay_update":
+        row_id = unquote(params.get("id", ""))
+        status = unquote(params.get("status", ""))
+        ok     = get_db().update_payment_status(row_id, status)
+        _reply_text(event, f"✅ {row_id} 已更新為「{status}」" if ok else f"❌ 找不到記錄 {row_id}")
 
     # ── 刪除行程
     elif action == "del_schedule":
@@ -406,7 +412,13 @@ def _parse_command(text: str) -> dict:
             return _t("✅ 目前沒有待處理的保服案件")
         contents = build_cases_card("保服案件", pending)
         return _f("保服案件", contents)
-        
+
+    # 扣款失敗
+    elif cmd == "扣款失敗":
+        records  = get_db().get_payment_failures()
+        contents = build_payment_list_card(records)
+        return _f("扣款失敗追蹤", contents)
+
  # 待辦（今日彙整）
     elif cmd == "待辦":
         try:
@@ -440,10 +452,13 @@ def _parse_command(text: str) -> dict:
                 pid = str(row["保單號碼"]).strip()
                 cur = statuses.get(pid, {}).get("status", "")
                 if cur not in skip:
-                    urgent_list.append(f"▪️ {row['被保姓名']} 倒數{int(row['剩餘天數'])}天")
+                    urgent_list.append(f"▪️ {str(row['被保姓名']).strip().replace(chr(10), '')} 倒數{int(row['剩餘天數'])}天")
 
             # 保服未完成
             cases = get_db().get_all_pending_cases()
+
+            # 扣款失敗
+            payments = get_db().get_payment_failures()
 
             # 業務待跟進
             biz = [r for r in get_db().get_biz_list() if r.get("階段") in ["已聯繫", "建議書"]]
@@ -473,6 +488,13 @@ def _parse_command(text: str) -> dict:
             for c in cases[:5]:
                 lines.append(f"▪️ {c.get('客戶姓名','')} {c.get('服務項目','')} [{c.get('狀態','')}]")
             if not cases:
+                lines.append("▪️ 無待處理")
+
+            lines.append("")
+            lines.append(f"💳 扣款失敗（{len(payments)} 件）")
+            for p in payments[:5]:
+                lines.append(f"▪️ {p.get('要保人','')} {p.get('公司','')} [{p.get('類別','')}]")
+            if not payments:
                 lines.append("▪️ 無待處理")
 
             lines.append("")
@@ -592,7 +614,7 @@ def _parse_command(text: str) -> dict:
     # 新增新件 <姓名> <保險公司>
     elif cmd == "新增新件" and len(parts) >= 3:
         name    = parts[1]
-        company = parts[2]
+        company = " ".join(parts[2:])
         stage   = parts[3] if len(parts) >= 4 else "核保中"
         rid     = get_db().add_newcase(name, company, stage)
         contents = build_newcase_single_card(rid, name, company, stage)
@@ -710,6 +732,8 @@ def _parse_command(text: str) -> dict:
                 name = get_db().update_newcase_note(rid, note)
             elif prefix == "C":
                 name = get_db().update_case_note(rid, note)
+            elif prefix == "P":
+                name = get_db().add_payment_note(rid, note)
             else:
                 name = ""
             return _t(f"✅ {rid} 備註已記錄：{note}" if name else f"❌ 找不到 {rid}")
